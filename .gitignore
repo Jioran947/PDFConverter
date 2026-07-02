@@ -1,0 +1,19 @@
+# Build outputs and caches
+build/
+dist/
+__pycache__/
+*.spec
+
+# Generated app packages should be uploaded to GitHub Releases instead.
+PDFConverter.exe
+versions/
+
+# Local test outputs
+output/
+output_*/
+tmp/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+*.log
