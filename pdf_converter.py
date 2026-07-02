@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import ctypes
 import json
 import os
@@ -9,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable
@@ -38,6 +40,20 @@ TEXT_EXTS = {".txt", ".md", ".log"}
 SPREADSHEET_TABLE_EXTS = {".xlsx", ".xlsm", ".csv"}
 SUPPORTED_EXTS = IMAGE_EXTS | OFFICE_EXTS | TEXT_EXTS | {".pdf"}
 COM_CONVERSION_LOCK = threading.Lock()
+SHUTDOWN_EVENT = threading.Event()
+ACTIVE_PROCESS_LOCK = threading.Lock()
+ACTIVE_SUBPROCESSES: set[subprocess.Popen] = set()
+ACTIVE_EXTERNAL_PIDS: set[int] = set()
+OFFICE_PROCESS_NAMES = {
+    "WINWORD.EXE",
+    "POWERPNT.EXE",
+    "EXCEL.EXE",
+    "WPS.EXE",
+    "WPP.EXE",
+    "ET.EXE",
+    "SOFFICE.EXE",
+    "SOFFICE.BIN",
+}
 
 TYPE_PROFILES = {
     "All supported files": SUPPORTED_EXTS,
@@ -598,13 +614,133 @@ def find_libreoffice() -> str | None:
     return None
 
 
+def check_shutdown_requested() -> None:
+    if SHUTDOWN_EVENT.is_set():
+        raise RuntimeError("Conversion cancelled")
+
+
+def taskkill_pid(pid: int) -> None:
+    if pid <= 0:
+        return
+    if os.name == "nt":
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=flags,
+                timeout=5,
+            )
+        except Exception:
+            pass
+
+
+def terminate_process(proc: subprocess.Popen) -> None:
+    if proc.poll() is not None:
+        return
+    if os.name == "nt":
+        taskkill_pid(proc.pid)
+        return
+    try:
+        proc.terminate()
+        proc.wait(timeout=3)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
+def register_subprocess(proc: subprocess.Popen) -> None:
+    with ACTIVE_PROCESS_LOCK:
+        ACTIVE_SUBPROCESSES.add(proc)
+
+
+def unregister_subprocess(proc: subprocess.Popen) -> None:
+    with ACTIVE_PROCESS_LOCK:
+        ACTIVE_SUBPROCESSES.discard(proc)
+
+
+def register_external_pids(pids: set[int]) -> None:
+    if not pids:
+        return
+    with ACTIVE_PROCESS_LOCK:
+        ACTIVE_EXTERNAL_PIDS.update(pid for pid in pids if pid > 0)
+
+
+def unregister_external_pids(pids: set[int]) -> None:
+    if not pids:
+        return
+    with ACTIVE_PROCESS_LOCK:
+        ACTIVE_EXTERNAL_PIDS.difference_update(pids)
+
+
+def terminate_tracked_processes() -> None:
+    with ACTIVE_PROCESS_LOCK:
+        subprocesses = list(ACTIVE_SUBPROCESSES)
+        external_pids = list(ACTIVE_EXTERNAL_PIDS)
+    for proc in subprocesses:
+        terminate_process(proc)
+    for pid in external_pids:
+        taskkill_pid(pid)
+
+
+def office_process_snapshot() -> set[int]:
+    if os.name != "nt":
+        return set()
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        completed = subprocess.run(
+            ["tasklist", "/FO", "CSV", "/NH"],
+            capture_output=True,
+            text=True,
+            creationflags=flags,
+            timeout=5,
+        )
+    except Exception:
+        return set()
+    pids: set[int] = set()
+    for row in csv.reader(completed.stdout.splitlines()):
+        if len(row) < 2:
+            continue
+        if row[0].strip().upper() not in OFFICE_PROCESS_NAMES:
+            continue
+        try:
+            pids.add(int(row[1]))
+        except ValueError:
+            pass
+    return pids
+
+
+def wait_for_tracked_process(
+    proc: subprocess.Popen,
+    timeout_seconds: int,
+) -> tuple[int, str, str]:
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        if SHUTDOWN_EVENT.is_set():
+            terminate_process(proc)
+            raise RuntimeError("Conversion cancelled")
+        remaining = max(0.1, min(0.25, deadline - time.monotonic()))
+        try:
+            stdout, stderr = proc.communicate(timeout=remaining)
+            return proc.returncode or 0, stdout or "", stderr or ""
+        except subprocess.TimeoutExpired:
+            if time.monotonic() >= deadline:
+                terminate_process(proc)
+                raise RuntimeError("Conversion timed out")
+
+
 def convert_with_libreoffice(source: Path, output_dir: Path) -> Path:
     soffice = find_libreoffice()
     if not soffice:
         raise RuntimeError("LibreOffice was not found")
 
+    check_shutdown_requested()
     before = set(output_dir.glob("*.pdf"))
-    completed = subprocess.run(
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+    proc = subprocess.Popen(
         [
             soffice,
             "--headless",
@@ -614,16 +750,23 @@ def convert_with_libreoffice(source: Path, output_dir: Path) -> Path:
             str(output_dir),
             str(source),
         ],
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        timeout=180,
+        creationflags=flags,
     )
+    register_subprocess(proc)
+    try:
+        returncode, stdout, stderr = wait_for_tracked_process(proc, 180)
+    finally:
+        unregister_subprocess(proc)
+
     after = set(output_dir.glob("*.pdf"))
     created = sorted(after - before, key=lambda p: p.stat().st_mtime, reverse=True)
     expected = output_dir / f"{source.stem}.pdf"
 
-    if completed.returncode != 0:
-        detail = (completed.stderr or completed.stdout or "").strip()
+    if returncode != 0:
+        detail = (stderr or stdout or "").strip()
         raise RuntimeError(detail or "LibreOffice conversion failed")
     if expected.exists():
         return expected
@@ -692,6 +835,7 @@ def convert_with_office_com(source: Path, target: Path) -> None:
     if os.name != "nt":
         raise RuntimeError("Microsoft Office or WPS automation is only available on Windows")
 
+    check_shutdown_requested()
     try:
         import pythoncom  # type: ignore
         import win32com.client  # type: ignore
@@ -700,33 +844,55 @@ def convert_with_office_com(source: Path, target: Path) -> None:
 
     ext = source.suffix.lower()
     with COM_CONVERSION_LOCK:
+        check_shutdown_requested()
         pythoncom.CoInitialize()
         app = None
         document = None
+        known_pids = office_process_snapshot()
+        tracked_pids: set[int] = set()
+
+        def track_new_office_processes() -> None:
+            new_pids = office_process_snapshot() - known_pids - tracked_pids
+            if new_pids:
+                tracked_pids.update(new_pids)
+                register_external_pids(new_pids)
+
         try:
             if ext in {".doc", ".docx", ".rtf"}:
                 app, _provider = dispatch_com_application(
                     win32com.client,
                     ("Word.Application", "KWPS.Application", "WPS.Application"),
                 )
+                track_new_office_processes()
+                check_shutdown_requested()
                 set_visible_false(app)
                 document = app.Documents.Open(str(source))
+                track_new_office_processes()
+                check_shutdown_requested()
                 export_word_pdf(document, target)
             elif ext in {".ppt", ".pptx"}:
                 app, _provider = dispatch_com_application(
                     win32com.client,
                     ("PowerPoint.Application", "KWPP.Application"),
                 )
+                track_new_office_processes()
+                check_shutdown_requested()
                 set_visible_false(app)
                 document = open_presentation(app, source)
+                track_new_office_processes()
+                check_shutdown_requested()
                 document.SaveAs(str(target), 32)
             elif ext in {".xls", ".xlsx", ".xlsm", ".csv"}:
                 app, _provider = dispatch_com_application(
                     win32com.client,
                     ("Excel.Application", "KET.Application", "ET.Application"),
                 )
+                track_new_office_processes()
+                check_shutdown_requested()
                 set_visible_false(app)
                 document = app.Workbooks.Open(str(source))
+                track_new_office_processes()
+                check_shutdown_requested()
                 export_workbook_pdf(document, target)
             else:
                 raise RuntimeError(f"Microsoft Office/WPS does not support this extension: {ext}")
@@ -735,6 +901,9 @@ def convert_with_office_com(source: Path, target: Path) -> None:
                 close_com_document(document)
             if app is not None:
                 safe_com_call(app, "Quit")
+            if SHUTDOWN_EVENT.is_set():
+                terminate_tracked_processes()
+            unregister_external_pids(tracked_pids)
             pythoncom.CoUninitialize()
 
 
@@ -756,6 +925,7 @@ def convert_office_to_pdf(source: Path, target: Path, output_dir: Path) -> Path:
 
 
 def convert_one(source: Path, output_dir: Path) -> ConvertResult:
+    check_shutdown_requested()
     output_dir.mkdir(parents=True, exist_ok=True)
     ext = source.suffix.lower()
     target = safe_pdf_name(source, output_dir)
@@ -798,6 +968,8 @@ def batch_convert(
         converted: list[Path] = []
         try:
             for file in files:
+                if SHUTDOWN_EVENT.is_set():
+                    break
                 result = convert_one(file, temp_dir)
                 results.append(result)
                 if result.ok and result.output:
@@ -853,6 +1025,8 @@ def batch_convert(
         files = other_files
 
     for file in files:
+        if SHUTDOWN_EVENT.is_set():
+            break
         result = convert_one(file, output_dir)
         results.append(result)
         if on_result:
@@ -913,6 +1087,7 @@ def run_gui() -> None:
     status_var = tk.StringVar(value=TEXT[settings["language"]]["drop_hint"])
     closing_var = tk.BooleanVar(value=False)
     active_workers: list[threading.Thread] = []
+    close_deadline = {"time": 0.0}
 
     root.columnconfigure(0, weight=1)
     root.rowconfigure(3, weight=1)
@@ -1471,7 +1646,7 @@ def run_gui() -> None:
         return bool(active_workers)
 
     def finish_close_when_ready() -> None:
-        if has_active_worker():
+        if has_active_worker() and time.monotonic() < close_deadline["time"]:
             root.after(200, finish_close_when_ready)
             return
         try:
@@ -1481,7 +1656,12 @@ def run_gui() -> None:
             pass
 
     def on_close() -> None:
+        if closing_var.get():
+            return
         closing_var.set(True)
+        SHUTDOWN_EVENT.set()
+        terminate_tracked_processes()
+        close_deadline["time"] = time.monotonic() + 4
         start_button.configure(state="disabled")
         if has_active_worker():
             status_var.set("正在结束当前转换任务，完成清理后关闭...")
@@ -1526,13 +1706,17 @@ def run_gui() -> None:
         finally:
             safe_after(0, start_button.configure, {"state": "normal"})
             if closing_var.get():
-                root.after(0, finish_close_when_ready)
+                try:
+                    root.after(0, finish_close_when_ready)
+                except Exception:
+                    pass
 
     def start() -> None:
         if closing_var.get():
             return
+        SHUTDOWN_EVENT.clear()
         start_button.configure(state="disabled")
-        thread = threading.Thread(target=worker, daemon=False)
+        thread = threading.Thread(target=worker, daemon=True)
         active_workers.append(thread)
         thread.start()
 
@@ -1554,6 +1738,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
+    SHUTDOWN_EVENT.clear()
     args = parse_args(argv or sys.argv[1:])
     if not args.inputs:
         run_gui()
