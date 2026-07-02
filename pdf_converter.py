@@ -197,6 +197,13 @@ class ConvertResult:
     output: Path | None = None
 
 
+@dataclass
+class StagedOutput:
+    result: ConvertResult
+    staged_pdf: Path
+    final_target: Path
+
+
 def safe_pdf_name(path: Path, output_dir: Path) -> Path:
     target = output_dir / f"{path.stem}.pdf"
     if not target.exists():
@@ -948,6 +955,65 @@ def convert_one(source: Path, output_dir: Path) -> ConvertResult:
         return ConvertResult(source, False, str(exc), None)
 
 
+def publish_results(
+    results: list[ConvertResult],
+    on_result: Callable[[ConvertResult], None] | None = None,
+) -> list[ConvertResult]:
+    if on_result:
+        for result in results:
+            on_result(result)
+    return results
+
+
+def discarded_batch_results(staged: list[ConvertResult], reason: str) -> list[ConvertResult]:
+    if not staged:
+        return [ConvertResult(source=Path("batch"), ok=False, message=reason, output=None)]
+    discarded: list[ConvertResult] = []
+    for result in staged:
+        message = result.message if not result.ok else reason
+        discarded.append(ConvertResult(result.source, False, message, None))
+    return discarded
+
+
+def publish_discarded_results(
+    staged: list[ConvertResult],
+    reason: str,
+    on_result: Callable[[ConvertResult], None] | None = None,
+) -> list[ConvertResult]:
+    return publish_results(discarded_batch_results(staged, reason), on_result)
+
+
+def move_staged_pdf(staged_pdf: Path, final_target: Path, output_dir: Path) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if final_target.exists():
+        final_target = safe_pdf_name(final_target, output_dir)
+    shutil.move(str(staged_pdf), str(final_target))
+    return final_target
+
+
+def publish_staged_outputs(
+    staged_outputs: list[StagedOutput],
+    output_dir: Path,
+) -> list[ConvertResult]:
+    moved_outputs: list[Path] = []
+    final_results: list[ConvertResult] = []
+    try:
+        for staged in staged_outputs:
+            moved = move_staged_pdf(staged.staged_pdf, staged.final_target, output_dir)
+            moved_outputs.append(moved)
+            final_results.append(
+                ConvertResult(staged.result.source, True, staged.result.message, moved)
+            )
+    except Exception:
+        for moved in moved_outputs:
+            try:
+                moved.unlink()
+            except OSError:
+                pass
+        raise
+    return final_results
+
+
 def batch_convert(
     inputs: list[Path],
     output_dir: Path,
@@ -959,32 +1025,9 @@ def batch_convert(
     on_result: Callable[[ConvertResult], None] | None = None,
 ) -> list[ConvertResult]:
     files = collect_files(inputs, recursive=recursive, allowed_exts=allowed_exts)
-    results: list[ConvertResult] = []
-
-    def publish(final_results: list[ConvertResult]) -> list[ConvertResult]:
-        if on_result:
-            for item in final_results:
-                on_result(item)
-        return final_results
-
-    def discarded_results(staged: list[ConvertResult], reason: str) -> list[ConvertResult]:
-        if not staged:
-            return [ConvertResult(source=Path("batch"), ok=False, message=reason, output=None)]
-        discarded: list[ConvertResult] = []
-        for item in staged:
-            message = item.message if not item.ok else reason
-            discarded.append(ConvertResult(item.source, False, message, None))
-        return discarded
-
-    def move_staged_pdf(staged_pdf: Path, final_target: Path) -> Path:
-        output_dir.mkdir(parents=True, exist_ok=True)
-        if final_target.exists():
-            final_target = safe_pdf_name(final_target, output_dir)
-        shutil.move(str(staged_pdf), str(final_target))
-        return final_target
 
     if not files:
-        return publish([])
+        return publish_results([], on_result)
 
     if merge_all:
         temp_dir = Path(tempfile.mkdtemp(prefix="pdf_converter_"))
@@ -1001,18 +1044,36 @@ def batch_convert(
                 if result.ok and result.output:
                     converted.append(result.output)
             if SHUTDOWN_EVENT.is_set():
-                return publish(discarded_results(staged_results, "Conversion cancelled; generated files were removed"))
+                return publish_discarded_results(
+                    staged_results,
+                    "Conversion cancelled; generated files were removed",
+                    on_result,
+                )
             if len(staged_results) != len(files) or not all(item.ok for item in staged_results):
-                return publish(discarded_results(staged_results, "Batch failed; generated files were removed"))
+                return publish_discarded_results(
+                    staged_results,
+                    "Batch failed; generated files were removed",
+                    on_result,
+                )
             if not converted:
-                return publish([ConvertResult(Path(merged_name), False, "No PDF files were created for merging", None)])
+                return publish_results(
+                    [
+                        ConvertResult(
+                            Path(merged_name),
+                            False,
+                            "No PDF files were created for merging",
+                            None,
+                        )
+                    ],
+                    on_result,
+                )
 
             staged_merged = safe_pdf_name(Path(merged_name), temp_dir)
             merge_pdfs(converted, staged_merged)
             check_shutdown_requested()
             final_target = safe_pdf_name(Path(merged_name), output_dir)
-            moved = move_staged_pdf(staged_merged, final_target)
-            results = [
+            moved = move_staged_pdf(staged_merged, final_target, output_dir)
+            results: list[ConvertResult] = [
                 ConvertResult(item.source, True, "Prepared for merge", None)
                 for item in staged_results
             ]
@@ -1024,16 +1085,19 @@ def batch_convert(
                     output=moved,
                 )
             )
-            return publish(results)
+            return publish_results(results, on_result)
         except Exception as exc:  # noqa: BLE001 - clean partial batch output.
-            return publish(discarded_results(staged_results, f"Batch failed; generated files were removed: {exc}"))
+            return publish_discarded_results(
+                staged_results,
+                f"Batch failed; generated files were removed: {exc}",
+                on_result,
+            )
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     staged_results: list[ConvertResult] = []
-    staged_outputs: list[tuple[ConvertResult, Path, Path]] = []
+    staged_outputs: list[StagedOutput] = []
     temp_dir = Path(tempfile.mkdtemp(prefix="pdf_converter_"))
-    moved_outputs: list[Path] = []
     expected_stage_count = len(files)
     if merge_images:
         image_files = [p for p in files if p.suffix.lower() in IMAGE_EXTS]
@@ -1058,7 +1122,9 @@ def batch_convert(
                 )
             staged_results.append(result)
             if result.ok and result.output:
-                staged_outputs.append((result, result.output, output_dir / staged_target.name))
+                staged_outputs.append(
+                    StagedOutput(result, result.output, output_dir / staged_target.name)
+                )
         files = other_files
 
     try:
@@ -1070,31 +1136,36 @@ def batch_convert(
             if not result.ok:
                 break
             if result.output:
-                staged_outputs.append((result, result.output, safe_pdf_name(result.source, output_dir)))
+                staged_outputs.append(
+                    StagedOutput(result, result.output, safe_pdf_name(result.source, output_dir))
+                )
 
         if SHUTDOWN_EVENT.is_set():
-            return publish(discarded_results(staged_results, "Conversion cancelled; generated files were removed"))
+            return publish_discarded_results(
+                staged_results,
+                "Conversion cancelled; generated files were removed",
+                on_result,
+            )
         if len(staged_results) < expected_stage_count:
-            return publish(discarded_results(staged_results, "Batch did not complete; generated files were removed"))
+            return publish_discarded_results(
+                staged_results,
+                "Batch did not complete; generated files were removed",
+                on_result,
+            )
         if not all(item.ok for item in staged_results):
-            return publish(discarded_results(staged_results, "Batch failed; generated files were removed"))
+            return publish_discarded_results(
+                staged_results,
+                "Batch failed; generated files were removed",
+                on_result,
+            )
 
-        final_results: list[ConvertResult] = []
-        try:
-            for result, staged_pdf, final_target in staged_outputs:
-                moved = move_staged_pdf(staged_pdf, final_target)
-                moved_outputs.append(moved)
-                final_results.append(ConvertResult(result.source, True, result.message, moved))
-        except Exception:
-            for moved in moved_outputs:
-                try:
-                    moved.unlink()
-                except OSError:
-                    pass
-            raise
-        return publish(final_results)
+        return publish_results(publish_staged_outputs(staged_outputs, output_dir), on_result)
     except Exception as exc:  # noqa: BLE001 - clean partial batch output.
-        return publish(discarded_results(staged_results, f"Batch failed; generated files were removed: {exc}"))
+        return publish_discarded_results(
+            staged_results,
+            f"Batch failed; generated files were removed: {exc}",
+            on_result,
+        )
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
