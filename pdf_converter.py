@@ -95,6 +95,7 @@ TEXT = {
         "clear": "清空",
         "include_subfolders": "包含子文件夹",
         "merge_final": "合并最终 PDF",
+        "start_merged": "转换后合并",
         "convert_type": "转换类型",
         "merged_name": "合并后的 PDF 名称",
         "output_folder": "输出文件夹",
@@ -144,6 +145,7 @@ TEXT = {
         "clear": "Clear",
         "include_subfolders": "Include subfolders",
         "merge_final": "Merge final PDFs",
+        "start_merged": "Convert and merge",
         "convert_type": "Convert type",
         "merged_name": "Merged PDF name",
         "output_folder": "Output folder",
@@ -254,6 +256,49 @@ def save_settings(settings: dict[str, str]) -> None:
     path = config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def default_output_dir() -> Path:
+    if os.name == "nt":
+        try:
+            import winreg
+
+            with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders",
+            ) as key:
+                value, _type = winreg.QueryValueEx(
+                    key,
+                    "{374DE290-123F-4565-9164-39C4925E467B}",
+                )
+            downloads = Path(os.path.expandvars(value))
+            if downloads.exists():
+                return downloads
+        except Exception:
+            pass
+    for candidate in (Path.home() / "Downloads", Path.home() / "下载"):
+        if candidate.exists():
+            return candidate
+    return Path.home()
+
+
+def open_path(path: Path) -> None:
+    try:
+        if os.name == "nt":
+            os.startfile(str(path))  # type: ignore[attr-defined]
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", str(path)])
+        else:
+            subprocess.Popen(["xdg-open", str(path)])
+    except Exception:
+        pass
+
+
+def open_conversion_outputs(outputs: list[Path], output_dir: Path) -> None:
+    existing = [path for path in outputs if path.exists()]
+    if not existing:
+        return
+    open_path(existing[0] if len(existing) == 1 else output_dir)
 
 
 def collect_files(
@@ -1210,11 +1255,10 @@ def run_gui() -> None:
     style.configure("TLabel", padding=(2, 2))
 
     selected: list[Path] = []
-    default_output = Path.cwd() / "output"
+    default_output = default_output_dir()
     settings = load_settings()
 
     recursive_var = tk.BooleanVar(value=True)
-    merge_all_var = tk.BooleanVar(value=False)
     output_var = tk.StringVar(value=str(default_output))
     language_code_var = tk.StringVar(value=settings["language"])
     language_display_var = tk.StringVar(value=LANGUAGES[settings["language"]])
@@ -1230,7 +1274,7 @@ def run_gui() -> None:
 
     top = ttk.Frame(root, padding=14)
     top.grid(row=0, column=0, sticky="ew")
-    top.columnconfigure(5, weight=1)
+    top.columnconfigure(4, weight=1)
 
     def current_language() -> str:
         return language_code_var.get()
@@ -1327,8 +1371,6 @@ def run_gui() -> None:
     clear_button.grid(row=0, column=2, padx=(0, 12))
     recursive_check = ttk.Checkbutton(top, variable=recursive_var)
     recursive_check.grid(row=0, column=3, padx=(0, 12))
-    merge_check = ttk.Checkbutton(top, variable=merge_all_var)
-    merge_check.grid(row=0, column=4, sticky="w")
     language_label = ttk.Label(top)
     language_label.grid(row=0, column=5, sticky="e", padx=(12, 8))
     language_menu = ttk.Combobox(
@@ -1728,7 +1770,9 @@ def run_gui() -> None:
     ttk.Label(bottom, textvariable=status_var).grid(row=0, column=0, sticky="w")
 
     start_button = ttk.Button(bottom)
-    start_button.grid(row=0, column=1, sticky="e")
+    start_button.grid(row=0, column=1, sticky="e", padx=(8, 0))
+    start_merged_button = ttk.Button(bottom)
+    start_merged_button.grid(row=0, column=2, sticky="e", padx=(8, 0))
 
     def apply_language() -> None:
         lang = current_language()
@@ -1738,7 +1782,6 @@ def run_gui() -> None:
         add_folder_button.configure(text=tr("add_folder"))
         clear_button.configure(text=tr("clear"))
         recursive_check.configure(text=tr("include_subfolders"))
-        merge_check.configure(text=tr("merge_final"))
         language_label.configure(text=tr("language"))
         convert_type_label.configure(text=tr("convert_type"))
         merged_name_label.configure(text=tr("merged_name"))
@@ -1749,6 +1792,7 @@ def run_gui() -> None:
         remove_button.configure(text=tr("remove"))
         split_button.configure(text=tr("split_pdf"))
         start_button.configure(text=tr("start"))
+        start_merged_button.configure(text=tr("start_merged"))
         type_menu.configure(values=[PROFILE_LABELS[lang][key] for key in TYPE_PROFILES])
         type_var.set(PROFILE_LABELS[lang][current_profile_key])
         refresh_list()
@@ -1781,6 +1825,10 @@ def run_gui() -> None:
         active_workers[:] = [thread for thread in active_workers if thread.is_alive()]
         return bool(active_workers)
 
+    def set_start_buttons_state(state: str) -> None:
+        start_button.configure(state=state)
+        start_merged_button.configure(state=state)
+
     def finish_close_when_ready() -> None:
         if has_active_worker() and time.monotonic() < close_deadline["time"]:
             root.after(200, finish_close_when_ready)
@@ -1798,14 +1846,14 @@ def run_gui() -> None:
         SHUTDOWN_EVENT.set()
         terminate_tracked_processes()
         close_deadline["time"] = time.monotonic() + 4
-        start_button.configure(state="disabled")
+        set_start_buttons_state("disabled")
         if has_active_worker():
             status_var.set("正在结束当前转换任务，完成清理后关闭...")
             root.after(200, finish_close_when_ready)
         else:
             finish_close_when_ready()
 
-    def worker() -> None:
+    def worker(merge_after_convert: bool) -> None:
         def report(result: ConvertResult) -> None:
             icon = tr("ok") if result.ok else tr("fail")
             output = f" -> {result.output}" if result.output else ""
@@ -1826,13 +1874,16 @@ def run_gui() -> None:
                 out,
                 recursive=recursive_var.get(),
                 allowed_exts=TYPE_PROFILES.get(profile_key_from_display(type_var.get()), SUPPORTED_EXTS),
-                merge_all=merge_all_var.get(),
+                merge_all=merge_after_convert,
                 merged_name=merged_name,
                 on_result=report,
             )
             ok_count = sum(1 for r in results if r.ok)
             fail_count = len(results) - ok_count
+            output_paths = [r.output for r in results if r.ok and r.output]
             safe_after(0, status_var.set, tr("done_status", ok=ok_count, fail=fail_count))
+            if fail_count == 0 and output_paths:
+                safe_after(0, open_conversion_outputs, output_paths, out)
             safe_after(
                 0,
                 messagebox.showinfo,
@@ -1840,23 +1891,24 @@ def run_gui() -> None:
                 tr("finished_body", ok=ok_count, fail=fail_count),
             )
         finally:
-            safe_after(0, start_button.configure, {"state": "normal"})
+            safe_after(0, set_start_buttons_state, "normal")
             if closing_var.get():
                 try:
                     root.after(0, finish_close_when_ready)
                 except Exception:
                     pass
 
-    def start() -> None:
+    def start(merge_after_convert: bool = False) -> None:
         if closing_var.get():
             return
         SHUTDOWN_EVENT.clear()
-        start_button.configure(state="disabled")
-        thread = threading.Thread(target=worker, daemon=True)
+        set_start_buttons_state("disabled")
+        thread = threading.Thread(target=worker, args=(merge_after_convert,), daemon=True)
         active_workers.append(thread)
         thread.start()
 
-    start_button.configure(command=start)
+    start_button.configure(command=lambda: start(False))
+    start_merged_button.configure(command=lambda: start(True))
     root.protocol("WM_DELETE_WINDOW", on_close)
     root.mainloop()
 
@@ -1864,7 +1916,12 @@ def run_gui() -> None:
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Batch convert files to PDF.")
     parser.add_argument("inputs", nargs="*", help="Files or folders. Omit to open the app window.")
-    parser.add_argument("-o", "--out", default="output", help="Output folder. Default: output.")
+    parser.add_argument(
+        "-o",
+        "--out",
+        default=str(default_output_dir()),
+        help="Output folder. Default: Downloads.",
+    )
     parser.add_argument("--no-recursive", action="store_true", help="Do not include subfolders.")
     parser.add_argument("--type", choices=list(TYPE_PROFILES.keys()), default="All supported files")
     parser.add_argument("--merge-images", action="store_true", help="Merge images into one PDF.")
