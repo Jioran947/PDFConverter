@@ -123,6 +123,10 @@ TEXT = {
         "split_choose_pdf": "选择要拆分的 PDF",
         "split_range_title": "选择页码",
         "split_range_prompt": "请输入页码范围，例如：1-3,5,8-10",
+        "split_range_label": "页码范围",
+        "split_export_range": "按页码导出",
+        "split_loading": "正在生成预览，请稍候...",
+        "split_no_pages_selected": "请先选择页面，或输入页码范围。",
         "split_done": "已导出 {count} 页：{path}",
         "split_failed": "拆分失败：{error}",
         "split_no_pdf": "请先在列表中选中一个 PDF，或接下来选择一个 PDF 文件。",
@@ -173,6 +177,10 @@ TEXT = {
         "split_choose_pdf": "Choose a PDF to split",
         "split_range_title": "Select pages",
         "split_range_prompt": "Enter page ranges, for example: 1-3,5,8-10",
+        "split_range_label": "Page range",
+        "split_export_range": "Export range",
+        "split_loading": "Creating previews, please wait...",
+        "split_no_pages_selected": "Select pages or enter a page range first.",
         "split_done": "Exported {count} page(s): {path}",
         "split_failed": "Split failed: {error}",
         "split_no_pdf": "Select one PDF in the list, or choose a PDF next.",
@@ -298,7 +306,10 @@ def open_conversion_outputs(outputs: list[Path], output_dir: Path) -> None:
     existing = [path for path in outputs if path.exists()]
     if not existing:
         return
-    open_path(existing[0] if len(existing) == 1 else output_dir)
+    folder = output_dir if output_dir.exists() else existing[0].parent
+    open_path(folder)
+    if len(existing) == 1:
+        open_path(existing[0])
 
 
 def collect_files(
@@ -1219,7 +1230,7 @@ def run_gui() -> None:
     enable_high_dpi()
     import tkinter as tk
     import tkinter.font as tkfont
-    from tkinter import filedialog, messagebox, simpledialog, ttk
+    from tkinter import filedialog, messagebox, ttk
 
     try:
         from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -1465,6 +1476,7 @@ def run_gui() -> None:
         result: list[int] | None = None
         thumbnails: list[object] = []
         done_var = tk.BooleanVar(value=False)
+        range_var = tk.StringVar(value="")
         previous_title = root.title()
         root.title(tr("split_pdf"))
 
@@ -1479,7 +1491,7 @@ def run_gui() -> None:
 
         toolbar = ttk.Frame(split_frame)
         toolbar.grid(row=0, column=0, sticky="ew", pady=(0, 10))
-        toolbar.columnconfigure(2, weight=1)
+        toolbar.columnconfigure(8, weight=1)
 
         canvas_area = ttk.Frame(split_frame)
         canvas_area.grid(row=1, column=0, sticky="nsew")
@@ -1523,45 +1535,206 @@ def run_gui() -> None:
         canvas_area.bind("<Enter>", bind_mousewheel)
         canvas_area.bind("<Leave>", unbind_mousewheel)
 
+        def clear_range_input() -> None:
+            if range_var.get():
+                range_var.set("")
+
         def set_all(value: bool) -> None:
             if value:
+                clear_range_input()
                 selected_pages.update(range(len(doc)))
             else:
                 selected_pages.clear()
             for index, variable in page_vars.items():
                 variable.set(index in selected_pages)
 
-        def finish() -> None:
+        def finish_selection() -> None:
             nonlocal result
+            if not selected_pages:
+                messagebox.showwarning(tr("split_pdf"), tr("split_no_pages_selected"))
+                return
             result = sorted(selected_pages)
+            done_var.set(True)
+
+        def finish_range() -> None:
+            nonlocal result
+            ranges = range_var.get().strip()
+            if not ranges:
+                messagebox.showwarning(tr("split_pdf"), tr("split_no_pages_selected"))
+                return
+            try:
+                result = parse_page_ranges(ranges, len(doc))
+            except Exception as exc:  # noqa: BLE001 - show friendly page range errors.
+                messagebox.showerror(tr("split_pdf"), tr("split_failed", error=exc))
+                return
             done_var.set(True)
 
         def back() -> None:
             done_var.set(True)
 
-        ttk.Button(toolbar, text=tr("back"), command=back).grid(row=0, column=0, sticky="w")
-        ttk.Button(toolbar, text=tr("select_all"), command=lambda: set_all(True)).grid(row=0, column=1, padx=(10, 0))
-        ttk.Button(toolbar, text=tr("clear_selection"), command=lambda: set_all(False)).grid(row=0, column=2, sticky="w", padx=(8, 0))
-        ttk.Button(toolbar, text=tr("export_selected"), command=finish).grid(row=0, column=3, sticky="e")
+        back_button = ttk.Button(toolbar, text=tr("back"), command=back)
+        back_button.grid(row=0, column=0, sticky="w")
+        select_all_button = ttk.Button(toolbar, text=tr("select_all"), command=lambda: set_all(True))
+        select_all_button.grid(row=0, column=1, padx=(10, 0))
+        clear_selection_button = ttk.Button(toolbar, text=tr("clear_selection"), command=lambda: set_all(False))
+        clear_selection_button.grid(row=0, column=2, sticky="w", padx=(8, 0))
+        range_label = ttk.Label(toolbar, text=tr("split_range_label"))
+        range_label.grid(row=0, column=3, sticky="e", padx=(14, 6))
+        range_entry = ttk.Entry(toolbar, textvariable=range_var, width=18)
+        range_entry.grid(row=0, column=4, sticky="ew")
+        export_range_button = ttk.Button(toolbar, text=tr("split_export_range"), command=finish_range)
+        export_range_button.grid(row=0, column=5, sticky="w", padx=(8, 0))
+        export_selected_button = ttk.Button(toolbar, text=tr("export_selected"), command=finish_selection)
+        export_selected_button.grid(row=0, column=9, sticky="e")
+        loading_label = ttk.Label(toolbar, text=tr("split_loading"))
+        loading_label.grid(row=0, column=1, columnspan=8, sticky="w", padx=(12, 0))
+        action_widgets = [
+            select_all_button,
+            clear_selection_button,
+            range_label,
+            range_entry,
+            export_range_button,
+            export_selected_button,
+        ]
+
+        def set_preview_loading(is_loading: bool) -> None:
+            if is_loading:
+                for widget in action_widgets:
+                    widget.grid_remove()
+                loading_label.grid()
+            else:
+                loading_label.grid_remove()
+                for widget in action_widgets:
+                    widget.grid()
 
         page_vars: dict[int, tk.BooleanVar] = {
             index: tk.BooleanVar(value=False) for index in range(len(doc))
         }
         checkbox_widgets: list[object] = []
+        page_bounds: dict[int, tuple[int, int, int, int]] = {}
+        render_state = {"token": 0, "after": None, "rendering": False}
+        drag_select = {"start": None, "rect": None, "moved": False}
 
-        def sync_selection(page_index: int, variable: tk.BooleanVar) -> None:
+        def on_range_changed(*_args) -> None:  # noqa: ANN002 - tkinter trace passes variable details.
+            if not range_var.get().strip():
+                return
+            selected_pages.clear()
+            for variable in page_vars.values():
+                variable.set(False)
+
+        range_var.trace_add("write", on_range_changed)
+
+        def sync_selection(page_index: int, variable: tk.BooleanVar, user_action: bool = False) -> None:
+            if user_action:
+                clear_range_input()
             if variable.get():
                 selected_pages.add(page_index)
             else:
                 selected_pages.discard(page_index)
 
         def toggle_from_page(page_index: int, variable: tk.BooleanVar) -> None:
+            clear_range_input()
             variable.set(not variable.get())
             sync_selection(page_index, variable)
+
+        def page_at(canvas_x: float, canvas_y: float) -> int | None:
+            for page_index, (x1, y1, x2, y2) in page_bounds.items():
+                if x1 <= canvas_x <= x2 and y1 <= canvas_y <= y2:
+                    return page_index
+            return None
+
+        def rectangles_intersect(
+            first: tuple[float, float, float, float],
+            second: tuple[int, int, int, int],
+        ) -> bool:
+            ax1, ay1, ax2, ay2 = first
+            bx1, by1, bx2, by2 = second
+            return ax1 <= bx2 and ax2 >= bx1 and ay1 <= by2 and ay2 >= by1
+
+        def begin_drag_select(event) -> str:  # noqa: ANN001 - tkinter event object.
+            if render_state["rendering"]:
+                return "break"
+            start = (preview_canvas.canvasx(event.x), preview_canvas.canvasy(event.y))
+            drag_select["start"] = start
+            drag_select["moved"] = False
+            if drag_select["rect"] is not None:
+                preview_canvas.delete(drag_select["rect"])
+                drag_select["rect"] = None
+            return "break"
+
+        def update_drag_select(event) -> str:  # noqa: ANN001 - tkinter event object.
+            start = drag_select.get("start")
+            if start is None or render_state["rendering"]:
+                return "break"
+            start_x, start_y = start
+            current_x = preview_canvas.canvasx(event.x)
+            current_y = preview_canvas.canvasy(event.y)
+            if abs(current_x - start_x) < 5 and abs(current_y - start_y) < 5:
+                return "break"
+            drag_select["moved"] = True
+            rect = drag_select.get("rect")
+            if rect is None:
+                rect = preview_canvas.create_rectangle(
+                    start_x,
+                    start_y,
+                    current_x,
+                    current_y,
+                    outline="#0b72d9",
+                    dash=(4, 2),
+                    width=2,
+                    tags=("drag_select_rect",),
+                )
+                drag_select["rect"] = rect
+            else:
+                preview_canvas.coords(rect, start_x, start_y, current_x, current_y)
+            return "break"
+
+        def finish_drag_select(event) -> str:  # noqa: ANN001 - tkinter event object.
+            start = drag_select.get("start")
+            if start is None or render_state["rendering"]:
+                return "break"
+            start_x, start_y = start
+            end_x = preview_canvas.canvasx(event.x)
+            end_y = preview_canvas.canvasy(event.y)
+            if drag_select.get("moved"):
+                selection = (
+                    min(start_x, end_x),
+                    min(start_y, end_y),
+                    max(start_x, end_x),
+                    max(start_y, end_y),
+                )
+                for page_index, bounds in page_bounds.items():
+                    if rectangles_intersect(selection, bounds):
+                        clear_range_input()
+                        selected_pages.add(page_index)
+                        page_vars[page_index].set(True)
+            else:
+                page_index = page_at(end_x, end_y)
+                if page_index is not None:
+                    toggle_from_page(page_index, page_vars[page_index])
+            if drag_select["rect"] is not None:
+                preview_canvas.delete(drag_select["rect"])
+            drag_select["start"] = None
+            drag_select["rect"] = None
+            drag_select["moved"] = False
+            return "break"
+
+        preview_canvas.bind("<ButtonPress-1>", begin_drag_select)
+        preview_canvas.bind("<B1-Motion>", update_drag_select)
+        preview_canvas.bind("<ButtonRelease-1>", finish_drag_select)
+
+        def cancel_render_job() -> None:
+            if render_state["after"] is not None:
+                try:
+                    root.after_cancel(render_state["after"])
+                except Exception:
+                    pass
+                render_state["after"] = None
 
         def render_grid() -> None:
             if not page_vars:
                 return
+            cancel_render_job()
             available_width = max(260, preview_canvas.winfo_width() - 28)
             gap_x = 22
             gap_y = 24
@@ -1579,82 +1752,123 @@ def run_gui() -> None:
                 layout_state["columns"] == columns
                 and abs(layout_state["tile_width"] - tile_width) < 4
                 and preview_canvas.find_withtag("page_item")
+                and not render_state["rendering"]
             ):
                 return
             layout_state["columns"] = columns
             layout_state["tile_width"] = tile_width
+            render_state["token"] += 1
+            token = render_state["token"]
+            render_state["rendering"] = True
 
             preview_canvas.delete("page_item")
+            preview_canvas.delete("loading_item")
+            preview_canvas.delete("drag_select_rect")
             thumbnails.clear()
             checkbox_widgets.clear()
-
-            for index in range(len(doc)):
-                page = doc.load_page(index)
-                rect = page.rect
-                zoom = min(max_preview_width / max(1, rect.width), max_preview_height / max(1, rect.height))
-                pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
-                image = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
-                photo = ImageTk.PhotoImage(image)
-                thumbnails.append(photo)
-                var = page_vars[index]
-
-                row = index // columns
-                column = index % columns
-                x = 14 + column * (tile_width + gap_x)
-                y = 14 + row * (tile_height + gap_y)
-                tag = f"page_{index}"
-
-                preview_canvas.create_image(
-                    x,
-                    y,
-                    image=photo,
-                    anchor="nw",
-                    tags=("page_item", tag),
-                )
-                preview_canvas.create_rectangle(
-                    x,
-                    y,
-                    x + max(1, pix.width) - 1,
-                    y + max(1, pix.height) - 1,
-                    fill="",
-                    outline="#222222",
-                    width=1,
-                    tags=("page_item", tag),
-                )
-                checkbox = ttk.Checkbutton(
-                    preview_canvas,
-                    variable=var,
-                    command=lambda page_index=index, variable=var: sync_selection(page_index, variable),
-                )
-                checkbox_widgets.append(checkbox)
-                preview_canvas.create_window(
-                    x + 6,
-                    y + 6,
-                    window=checkbox,
-                    anchor="nw",
-                    tags=("page_item",),
-                )
-                preview_canvas.create_text(
-                    x,
-                    y + pix.height + 10,
-                    text=tr("page_label", page=index + 1),
-                    anchor="nw",
-                    fill="#111111",
-                    font=("Microsoft YaHei UI", 11),
-                    tags=("page_item", tag),
-                )
-                preview_canvas.tag_bind(
-                    tag,
-                    "<Button-1>",
-                    lambda _event, page_index=index, variable=var: toggle_from_page(page_index, variable),
-                )
+            page_bounds.clear()
+            set_preview_loading(True)
 
             rows = (len(doc) + columns - 1) // columns
             total_width = 28 + columns * tile_width + (columns - 1) * gap_x
             total_height = 28 + rows * tile_height + (rows - 1) * gap_y
             preview_canvas.configure(scrollregion=(0, 0, total_width, total_height))
-            if total_height <= preview_canvas.winfo_height():
-                preview_canvas.yview_moveto(0)
+            preview_canvas.create_text(
+                max(preview_canvas.winfo_width() // 2, 160),
+                max(preview_canvas.winfo_height() // 2, 80),
+                text=tr("split_loading"),
+                anchor="center",
+                fill="#555555",
+                font=("Microsoft YaHei UI", 14),
+                tags=("loading_item",),
+            )
+
+            def render_page_batch(start_index: int) -> None:
+                if token != render_state["token"] or not root.winfo_exists():
+                    return
+                preview_canvas.delete("loading_item")
+                batch_size = 8
+                end_index = min(len(doc), start_index + batch_size)
+
+                try:
+                    for index in range(start_index, end_index):
+                        page = doc.load_page(index)
+                        rect = page.rect
+                        zoom = min(max_preview_width / max(1, rect.width), max_preview_height / max(1, rect.height))
+                        pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+                        image = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+                        photo = ImageTk.PhotoImage(image)
+                        thumbnails.append(photo)
+                        var = page_vars[index]
+
+                        row = index // columns
+                        column = index % columns
+                        x = 14 + column * (tile_width + gap_x)
+                        y = 14 + row * (tile_height + gap_y)
+                        tag = f"page_{index}"
+                        page_bounds[index] = (x, y, x + max(1, pix.width) - 1, y + max(1, pix.height) - 1)
+
+                        preview_canvas.create_image(
+                            x,
+                            y,
+                            image=photo,
+                            anchor="nw",
+                            tags=("page_item", tag),
+                        )
+                        preview_canvas.create_rectangle(
+                            x,
+                            y,
+                            x + max(1, pix.width) - 1,
+                            y + max(1, pix.height) - 1,
+                            fill="",
+                            outline="#222222",
+                            width=1,
+                            tags=("page_item", tag),
+                        )
+                        checkbox = ttk.Checkbutton(
+                            preview_canvas,
+                            variable=var,
+                            command=lambda page_index=index, variable=var: sync_selection(
+                                page_index,
+                                variable,
+                                True,
+                            ),
+                        )
+                        checkbox_widgets.append(checkbox)
+                        preview_canvas.create_window(
+                            x + 6,
+                            y + 6,
+                            window=checkbox,
+                            anchor="nw",
+                            tags=("page_item",),
+                        )
+                        preview_canvas.create_text(
+                            x,
+                            y + pix.height + 10,
+                            text=tr("page_label", page=index + 1),
+                            anchor="nw",
+                            fill="#111111",
+                            font=("Microsoft YaHei UI", 11),
+                            tags=("page_item", tag),
+                        )
+                except Exception:
+                    render_state["after"] = None
+                    render_state["rendering"] = False
+                    set_preview_loading(False)
+                    messagebox.showwarning(tr("split_pdf"), tr("split_preview_failed"))
+                    return
+
+                if end_index < len(doc):
+                    render_state["after"] = root.after(1, lambda: render_page_batch(end_index))
+                    return
+
+                render_state["after"] = None
+                render_state["rendering"] = False
+                set_preview_loading(False)
+                if total_height <= preview_canvas.winfo_height():
+                    preview_canvas.yview_moveto(0)
+
+            render_state["after"] = root.after(10, lambda: render_page_batch(0))
 
         try:
             root.update_idletasks()
@@ -1669,6 +1883,8 @@ def run_gui() -> None:
             return None
 
         root.wait_variable(done_var)
+        render_state["token"] += 1
+        cancel_render_job()
         unbind_mousewheel()
         split_frame.destroy()
         for widget in managed_widgets:
@@ -1700,18 +1916,11 @@ def run_gui() -> None:
             target = safe_pdf_name(Path(f"{source.stem}_split.pdf"), output_dir)
             page_indices = choose_pdf_pages_with_preview(source)
             if page_indices is None:
-                ranges = simpledialog.askstring(
-                    tr("split_range_title"),
-                    tr("split_range_prompt"),
-                    parent=root,
-                )
-                if not ranges:
-                    return
-                page_count = split_pdf_pages_v2(source, target, ranges)
-            else:
-                page_count = split_pdf_indices(source, target, page_indices)
+                return
+            page_count = split_pdf_indices(source, target, page_indices)
             append_log(tr("split_done", count=page_count, path=target))
             status_var.set(tr("split_done", count=page_count, path=target))
+            open_conversion_outputs([target], output_dir)
         except Exception as exc:  # noqa: BLE001 - GUI should show friendly errors.
             messagebox.showerror(tr("split_pdf"), tr("split_failed", error=exc))
 
