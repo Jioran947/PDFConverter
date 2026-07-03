@@ -59,7 +59,7 @@ TYPE_PROFILES = {
     "All supported files": SUPPORTED_EXTS,
     "Word documents": {".doc", ".docx", ".rtf", ".odt"},
     "PowerPoint files": {".ppt", ".pptx", ".odp"},
-        "Excel and CSV files": {".xls", ".xlsx", ".xlsm", ".ods", ".csv"},
+    "Excel and CSV files": {".xls", ".xlsx", ".xlsm", ".ods", ".csv"},
     "Images": IMAGE_EXTS,
     "Text and Markdown": TEXT_EXTS,
     "Existing PDFs": {".pdf"},
@@ -121,10 +121,8 @@ TEXT = {
         "ok": "成功",
         "fail": "失败",
         "split_choose_pdf": "选择要拆分的 PDF",
-        "split_range_title": "选择页码",
-        "split_range_prompt": "请输入页码范围，例如：1-3,5,8-10",
         "split_range_label": "页码范围",
-        "split_export_range": "按页码导出",
+        "split_range_placeholder": "请输入页码范围，例如：1-3,5,8-10",
         "split_loading": "正在生成预览，请稍候...",
         "split_no_pages_selected": "请先选择页面，或输入页码范围。",
         "split_done": "已导出 {count} 页：{path}",
@@ -175,10 +173,8 @@ TEXT = {
         "ok": "OK",
         "fail": "FAIL",
         "split_choose_pdf": "Choose a PDF to split",
-        "split_range_title": "Select pages",
-        "split_range_prompt": "Enter page ranges, for example: 1-3,5,8-10",
         "split_range_label": "Page range",
-        "split_export_range": "Export range",
+        "split_range_placeholder": "Enter pages, e.g. 1-3,5,8-10",
         "split_loading": "Creating previews, please wait...",
         "split_no_pages_selected": "Select pages or enter a page range first.",
         "split_done": "Exported {count} page(s): {path}",
@@ -417,53 +413,32 @@ def normalize_pdf_width(source: Path, target_width: float = A4[0]) -> None:
     temp.replace(source)
 
 
+def normalize_page_ranges(ranges: str) -> str:
+    replacements = {
+        "\uFF0C": ",",
+        "\u3001": ",",
+        "\uFF1B": ",",
+        ";": ",",
+        "\uFF0D": "-",
+        "\u2013": "-",
+        "\u2014": "-",
+        "~": "-",
+        "\uFF5E": "-",
+        "\u81F3": "-",
+        "\u5230": "-",
+        "\u311B": ",",
+        "\u311C": "-",
+        "\u301E": "-",
+    }
+    cleaned = ranges.strip()
+    for old, new in replacements.items():
+        cleaned = cleaned.replace(old, new)
+    return cleaned
+
 def parse_page_ranges(ranges: str, total_pages: int) -> list[int]:
     pages: list[int] = []
     seen: set[int] = set()
-    cleaned = ranges.replace("，", ",").replace("－", "-").replace("—", "-")
-    for part in cleaned.split(","):
-        token = part.strip()
-        if not token:
-            continue
-        if "-" in token:
-            start_text, end_text = token.split("-", 1)
-            start = int(start_text.strip())
-            end = int(end_text.strip())
-            if start > end:
-                start, end = end, start
-            numbers = range(start, end + 1)
-        else:
-            numbers = [int(token)]
-        for page_number in numbers:
-            if page_number < 1 or page_number > total_pages:
-                raise ValueError(f"Page {page_number} is outside 1-{total_pages}")
-            index = page_number - 1
-            if index not in seen:
-                pages.append(index)
-                seen.add(index)
-    if not pages:
-        raise ValueError("No pages selected")
-    return pages
-
-
-def split_pdf_pages(source: Path, target: Path, ranges: str) -> int:
-    from pypdf import PdfReader, PdfWriter
-
-    reader = PdfReader(str(source))
-    page_indices = parse_page_ranges(ranges, len(reader.pages))
-    writer = PdfWriter()
-    for index in page_indices:
-        writer.add_page(reader.pages[index])
-    target.parent.mkdir(parents=True, exist_ok=True)
-    with target.open("wb") as handle:
-        writer.write(handle)
-    return len(page_indices)
-
-
-def parse_page_ranges_v2(ranges: str, total_pages: int) -> list[int]:
-    pages: list[int] = []
-    seen: set[int] = set()
-    cleaned = ranges.translate(str.maketrans({"，": ",", "－": "-", "—": "-", "–": "-"}))
+    cleaned = normalize_page_ranges(ranges)
     for part in cleaned.split(","):
         token = part.strip()
         if not token:
@@ -504,17 +479,6 @@ def split_pdf_indices(source: Path, target: Path, page_indices: list[int]) -> in
     with target.open("wb") as handle:
         writer.write(handle)
     return len(page_indices)
-
-
-def split_pdf_pages_v2(source: Path, target: Path, ranges: str) -> int:
-    from pypdf import PdfReader
-
-    reader = PdfReader(str(source))
-    page_indices = parse_page_ranges_v2(ranges, len(reader.pages))
-    return split_pdf_indices(source, target, page_indices)
-
-
-split_pdf_pages = split_pdf_pages_v2
 
 
 def trim_table(rows: list[list[object]]) -> list[list[str]]:
@@ -1491,7 +1455,7 @@ def run_gui() -> None:
 
         toolbar = ttk.Frame(split_frame)
         toolbar.grid(row=0, column=0, sticky="ew", pady=(0, 10))
-        toolbar.columnconfigure(8, weight=1)
+        toolbar.columnconfigure(4, weight=1)
 
         canvas_area = ttk.Frame(split_frame)
         canvas_area.grid(row=1, column=0, sticky="nsew")
@@ -1504,16 +1468,53 @@ def run_gui() -> None:
         preview_canvas.configure(yscrollcommand=preview_scroll.set)
 
         layout_state = {"columns": 0, "tile_width": 0}
+        thumbnail_zoom = {"columns": None}
         resize_job = {"id": None}
 
-        def update_canvas_width(event) -> None:  # noqa: ANN001 - tkinter event object.
+        def schedule_render(delay_ms: int = 120) -> None:
             if resize_job["id"] is not None:
-                root.after_cancel(resize_job["id"])
-            resize_job["id"] = root.after(120, render_grid)
+                try:
+                    root.after_cancel(resize_job["id"])
+                except Exception:
+                    pass
+
+            def run_render() -> None:
+                resize_job["id"] = None
+                render_grid()
+
+            resize_job["id"] = root.after(delay_ms, run_render)
+
+        def update_canvas_width(event) -> None:  # noqa: ANN001 - tkinter event object.
+            schedule_render()
 
         preview_canvas.bind("<Configure>", update_canvas_width)
 
+        def zoom_thumbnails(event) -> str:  # noqa: ANN001 - tkinter event object.
+            delta = getattr(event, "delta", 0)
+            if not delta:
+                return "break"
+            direction = 1 if delta > 0 else -1
+            steps = max(1, min(4, abs(delta) // 120 if abs(delta) >= 120 else 1))
+            available_width = max(260, preview_canvas.winfo_width() - 28)
+            gap_x = 22
+            min_tile_width = 130
+            default_tile_width = 260
+            max_columns = max(1, min(len(doc), int((available_width + gap_x) // (min_tile_width + gap_x))))
+            auto_columns = max(1, min(max_columns, int((available_width + gap_x) // (default_tile_width + gap_x))))
+            current_columns = thumbnail_zoom["columns"] or layout_state["columns"] or auto_columns
+            current_columns = max(1, min(max_columns, current_columns))
+            new_columns = max(1, min(max_columns, current_columns - direction * steps))
+            if new_columns == current_columns:
+                return "break"
+            thumbnail_zoom["columns"] = new_columns
+            layout_state["columns"] = 0
+            layout_state["tile_width"] = 0
+            schedule_render(70)
+            return "break"
+
         def on_mousewheel(event) -> str:  # noqa: ANN001 - tkinter event object.
+            if getattr(event, "state", 0) & 0x0004:
+                return zoom_thumbnails(event)
             scrollregion = preview_canvas.cget("scrollregion")
             total_height = 0
             if scrollregion:
@@ -1535,38 +1536,74 @@ def run_gui() -> None:
         canvas_area.bind("<Enter>", bind_mousewheel)
         canvas_area.bind("<Leave>", unbind_mousewheel)
 
-        def clear_range_input() -> None:
-            if range_var.get():
-                range_var.set("")
+        range_sync = {"active": False}
+        placeholder_visible = {"value": False}
+
+        def format_page_ranges(page_indices: list[int]) -> str:
+            if not page_indices:
+                return ""
+            parts: list[str] = []
+            start = previous = page_indices[0] + 1
+            for page_index in page_indices[1:]:
+                page_number = page_index + 1
+                if page_number == previous + 1:
+                    previous = page_number
+                    continue
+                parts.append(str(start) if start == previous else f"{start}-{previous}")
+                start = previous = page_number
+            parts.append(str(start) if start == previous else f"{start}-{previous}")
+            return ",".join(parts)
+
+        def set_range_text_from_selection() -> None:
+            text = format_page_ranges(sorted(selected_pages))
+            range_sync["active"] = True
+            try:
+                placeholder_visible["value"] = False
+                range_entry.configure(style="TEntry")
+                range_var.set(text)
+            finally:
+                range_sync["active"] = False
+            if not text:
+                show_range_placeholder()
+
+        def apply_range_text_to_selection(show_errors: bool = False) -> bool:
+            if range_sync["active"]:
+                return True
+            ranges = "" if placeholder_visible["value"] else range_var.get().strip()
+            if not ranges:
+                selected_pages.clear()
+                for variable in page_vars.values():
+                    variable.set(False)
+                return True
+            try:
+                page_indices = parse_page_ranges(ranges, len(doc))
+            except Exception as exc:  # noqa: BLE001 - page range typing can be temporarily incomplete.
+                if show_errors:
+                    messagebox.showerror(tr("split_pdf"), tr("split_failed", error=exc))
+                return False
+            selected_pages.clear()
+            selected_pages.update(page_indices)
+            for index, variable in page_vars.items():
+                variable.set(index in selected_pages)
+            return True
 
         def set_all(value: bool) -> None:
             if value:
-                clear_range_input()
                 selected_pages.update(range(len(doc)))
             else:
                 selected_pages.clear()
             for index, variable in page_vars.items():
                 variable.set(index in selected_pages)
+            set_range_text_from_selection()
 
         def finish_selection() -> None:
             nonlocal result
+            if not apply_range_text_to_selection(True):
+                return
             if not selected_pages:
                 messagebox.showwarning(tr("split_pdf"), tr("split_no_pages_selected"))
                 return
             result = sorted(selected_pages)
-            done_var.set(True)
-
-        def finish_range() -> None:
-            nonlocal result
-            ranges = range_var.get().strip()
-            if not ranges:
-                messagebox.showwarning(tr("split_pdf"), tr("split_no_pages_selected"))
-                return
-            try:
-                result = parse_page_ranges(ranges, len(doc))
-            except Exception as exc:  # noqa: BLE001 - show friendly page range errors.
-                messagebox.showerror(tr("split_pdf"), tr("split_failed", error=exc))
-                return
             done_var.set(True)
 
         def back() -> None:
@@ -1580,20 +1617,48 @@ def run_gui() -> None:
         clear_selection_button.grid(row=0, column=2, sticky="w", padx=(8, 0))
         range_label = ttk.Label(toolbar, text=tr("split_range_label"))
         range_label.grid(row=0, column=3, sticky="e", padx=(14, 6))
-        range_entry = ttk.Entry(toolbar, textvariable=range_var, width=18)
-        range_entry.grid(row=0, column=4, sticky="ew")
-        export_range_button = ttk.Button(toolbar, text=tr("split_export_range"), command=finish_range)
-        export_range_button.grid(row=0, column=5, sticky="w", padx=(8, 0))
+        range_box = ttk.Frame(toolbar)
+        range_box.grid(row=0, column=4, sticky="ew")
+        range_box.columnconfigure(0, weight=1)
+        range_entry = ttk.Entry(range_box, textvariable=range_var, width=36)
+        range_entry.grid(row=0, column=0, sticky="ew")
+        range_style = ttk.Style(range_entry)
+        range_style.configure("Placeholder.TEntry", foreground="#8a8f98")
+
+        def show_range_placeholder() -> None:
+            if range_var.get().strip():
+                return
+            range_sync["active"] = True
+            try:
+                placeholder_visible["value"] = True
+                range_entry.configure(style="Placeholder.TEntry")
+                range_var.set(tr("split_range_placeholder"))
+            finally:
+                range_sync["active"] = False
+
+        def hide_range_placeholder() -> None:
+            if not placeholder_visible["value"]:
+                return
+            range_sync["active"] = True
+            try:
+                placeholder_visible["value"] = False
+                range_entry.configure(style="TEntry")
+                range_var.set("")
+            finally:
+                range_sync["active"] = False
+
+        range_entry.bind("<FocusIn>", lambda _event: hide_range_placeholder())
+        range_entry.bind("<FocusOut>", lambda _event: show_range_placeholder())
+        show_range_placeholder()
         export_selected_button = ttk.Button(toolbar, text=tr("export_selected"), command=finish_selection)
-        export_selected_button.grid(row=0, column=9, sticky="e")
+        export_selected_button.grid(row=0, column=5, sticky="e", padx=(10, 0))
         loading_label = ttk.Label(toolbar, text=tr("split_loading"))
         loading_label.grid(row=0, column=1, columnspan=8, sticky="w", padx=(12, 0))
         action_widgets = [
             select_all_button,
             clear_selection_button,
             range_label,
-            range_entry,
-            export_range_button,
+            range_box,
             export_selected_button,
         ]
 
@@ -1616,26 +1681,24 @@ def run_gui() -> None:
         drag_select = {"start": None, "rect": None, "moved": False}
 
         def on_range_changed(*_args) -> None:  # noqa: ANN002 - tkinter trace passes variable details.
-            if not range_var.get().strip():
+            if placeholder_visible["value"]:
                 return
-            selected_pages.clear()
-            for variable in page_vars.values():
-                variable.set(False)
+            apply_range_text_to_selection(False)
 
         range_var.trace_add("write", on_range_changed)
 
         def sync_selection(page_index: int, variable: tk.BooleanVar, user_action: bool = False) -> None:
-            if user_action:
-                clear_range_input()
             if variable.get():
                 selected_pages.add(page_index)
             else:
                 selected_pages.discard(page_index)
+            if user_action:
+                set_range_text_from_selection()
 
         def toggle_from_page(page_index: int, variable: tk.BooleanVar) -> None:
-            clear_range_input()
             variable.set(not variable.get())
             sync_selection(page_index, variable)
+            set_range_text_from_selection()
 
         def page_at(canvas_x: float, canvas_y: float) -> int | None:
             for page_index, (x1, y1, x2, y2) in page_bounds.items():
@@ -1703,11 +1766,14 @@ def run_gui() -> None:
                     max(start_x, end_x),
                     max(start_y, end_y),
                 )
+                changed_selection = False
                 for page_index, bounds in page_bounds.items():
                     if rectangles_intersect(selection, bounds):
-                        clear_range_input()
                         selected_pages.add(page_index)
                         page_vars[page_index].set(True)
+                        changed_selection = True
+                if changed_selection:
+                    set_range_text_from_selection()
             else:
                 page_index = page_at(end_x, end_y)
                 if page_index is not None:
@@ -1731,6 +1797,14 @@ def run_gui() -> None:
                     pass
                 render_state["after"] = None
 
+        def destroy_checkbox_widgets() -> None:
+            for checkbox in checkbox_widgets:
+                try:
+                    checkbox.destroy()
+                except Exception:
+                    pass
+            checkbox_widgets.clear()
+
         def render_grid() -> None:
             if not page_vars:
                 return
@@ -1738,12 +1812,15 @@ def run_gui() -> None:
             available_width = max(260, preview_canvas.winfo_width() - 28)
             gap_x = 22
             gap_y = 24
-            min_tile_width = 180
-            max_tile_width = 280
-            max_columns = max(1, int((available_width + gap_x) // (min_tile_width + gap_x)))
-            columns = max(1, min(len(doc), max_columns))
+            min_tile_width = 130
+            default_tile_width = 260
+            max_columns = max(1, min(len(doc), int((available_width + gap_x) // (min_tile_width + gap_x))))
+            auto_columns = max(1, min(max_columns, int((available_width + gap_x) // (default_tile_width + gap_x))))
+            requested_columns = thumbnail_zoom["columns"]
+            columns = requested_columns if requested_columns is not None else auto_columns
+            columns = max(1, min(max_columns, len(doc), columns))
             tile_width = int((available_width - gap_x * (columns - 1)) / columns)
-            tile_width = max(min_tile_width, min(max_tile_width, tile_width))
+            tile_width = max(1, tile_width)
             max_preview_width = tile_width
             max_preview_height = int(tile_width * 1.45)
             label_height = 34
@@ -1761,11 +1838,11 @@ def run_gui() -> None:
             token = render_state["token"]
             render_state["rendering"] = True
 
+            destroy_checkbox_widgets()
             preview_canvas.delete("page_item")
             preview_canvas.delete("loading_item")
             preview_canvas.delete("drag_select_rect")
             thumbnails.clear()
-            checkbox_widgets.clear()
             page_bounds.clear()
             set_preview_loading(True)
 
@@ -1874,6 +1951,14 @@ def run_gui() -> None:
             root.update_idletasks()
             render_grid()
         except Exception:
+            cancel_render_job()
+            if resize_job["id"] is not None:
+                try:
+                    root.after_cancel(resize_job["id"])
+                except Exception:
+                    pass
+                resize_job["id"] = None
+            destroy_checkbox_widgets()
             split_frame.destroy()
             for widget in managed_widgets:
                 widget.grid()
@@ -1885,7 +1970,14 @@ def run_gui() -> None:
         root.wait_variable(done_var)
         render_state["token"] += 1
         cancel_render_job()
+        if resize_job["id"] is not None:
+            try:
+                root.after_cancel(resize_job["id"])
+            except Exception:
+                pass
+            resize_job["id"] = None
         unbind_mousewheel()
+        destroy_checkbox_widgets()
         split_frame.destroy()
         for widget in managed_widgets:
             widget.grid()
