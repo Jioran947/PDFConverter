@@ -1822,9 +1822,8 @@ def run_gui() -> None:
             tile_width = int((available_width - gap_x * (columns - 1)) / columns)
             tile_width = max(1, tile_width)
             max_preview_width = tile_width
-            max_preview_height = int(tile_width * 1.45)
             label_height = 34
-            tile_height = max_preview_height + label_height
+
             if (
                 layout_state["columns"] == columns
                 and abs(layout_state["tile_width"] - tile_width) < 4
@@ -1832,6 +1831,23 @@ def run_gui() -> None:
                 and not render_state["rendering"]
             ):
                 return
+
+            page_heights: list[int] = []
+            for page_index in range(len(doc)):
+                rect = doc.load_page(page_index).rect
+                page_height = int(max(1, rect.height) * max_preview_width / max(1, rect.width))
+                page_heights.append(max(1, page_height))
+
+            rows = (len(doc) + columns - 1) // columns
+            row_tops: list[int] = []
+            current_y = 14
+            for row in range(rows):
+                start = row * columns
+                end = min(len(doc), start + columns)
+                tallest_page = max(page_heights[start:end], default=1)
+                row_tops.append(current_y)
+                current_y += tallest_page + label_height + gap_y
+
             layout_state["columns"] = columns
             layout_state["tile_width"] = tile_width
             render_state["token"] += 1
@@ -1846,9 +1862,8 @@ def run_gui() -> None:
             page_bounds.clear()
             set_preview_loading(True)
 
-            rows = (len(doc) + columns - 1) // columns
             total_width = 28 + columns * tile_width + (columns - 1) * gap_x
-            total_height = 28 + rows * tile_height + (rows - 1) * gap_y
+            total_height = current_y - gap_y + 14 if rows else 0
             preview_canvas.configure(scrollregion=(0, 0, total_width, total_height))
             preview_canvas.create_text(
                 max(preview_canvas.winfo_width() // 2, 160),
@@ -1871,7 +1886,7 @@ def run_gui() -> None:
                     for index in range(start_index, end_index):
                         page = doc.load_page(index)
                         rect = page.rect
-                        zoom = min(max_preview_width / max(1, rect.width), max_preview_height / max(1, rect.height))
+                        zoom = max_preview_width / max(1, rect.width)
                         pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
                         image = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
                         photo = ImageTk.PhotoImage(image)
@@ -1881,7 +1896,7 @@ def run_gui() -> None:
                         row = index // columns
                         column = index % columns
                         x = 14 + column * (tile_width + gap_x)
-                        y = 14 + row * (tile_height + gap_y)
+                        y = row_tops[row]
                         tag = f"page_{index}"
                         page_bounds[index] = (x, y, x + max(1, pix.width) - 1, y + max(1, pix.height) - 1)
 
