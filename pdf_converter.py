@@ -94,7 +94,6 @@ TEXT = {
         "add_folder": "添加文件夹",
         "clear": "清空",
         "include_subfolders": "包含子文件夹",
-        "merge_final": "合并最终 PDF",
         "start_merged": "转换后合并",
         "convert_type": "转换类型",
         "merged_name": "合并后的 PDF 名称",
@@ -133,8 +132,8 @@ TEXT = {
         "select_all": "全选",
         "clear_selection": "清空选择",
         "back": "返回",
-        "cancel": "取消",
         "page_label": "第 {page} 页",
+        "closing_status": "正在结束当前转换任务，完成清理后关闭...",
         "add_failed_title": "添加失败",
         "add_failed_body": "有 {count} 个项目未添加。可能是不支持的格式，或不符合当前转换类型。",
         "add_failed_log": "未添加：{path}",
@@ -146,7 +145,6 @@ TEXT = {
         "add_folder": "Add folder",
         "clear": "Clear",
         "include_subfolders": "Include subfolders",
-        "merge_final": "Merge final PDFs",
         "start_merged": "Convert and merge",
         "convert_type": "Convert type",
         "merged_name": "Merged PDF name",
@@ -185,8 +183,8 @@ TEXT = {
         "select_all": "Select all",
         "clear_selection": "Clear selection",
         "back": "Back",
-        "cancel": "Cancel",
         "page_label": "Page {page}",
+        "closing_status": "Finishing the current task and cleaning up before closing...",
         "add_failed_title": "Add failed",
         "add_failed_body": "{count} item(s) were not added. They may be unsupported or excluded by the current convert type.",
         "add_failed_log": "Not added: {path}",
@@ -502,8 +500,6 @@ def trim_table(rows: list[list[object]]) -> list[list[str]]:
 
 
 def csv_used_table(source: Path) -> list[tuple[str, list[list[str]]]]:
-    import csv
-
     rows: list[list[object]] = []
     with source.open("r", encoding="utf-8-sig", errors="replace", newline="") as handle:
         rows.extend(list(csv.reader(handle)))
@@ -1272,7 +1268,7 @@ def run_gui() -> None:
         file_list.delete(0, tk.END)
         for i, path in enumerate(selected, start=1):
             file_list.insert(tk.END, f"{i:02d}. {path}")
-        status_var.set(tr("selected", count=len(selected)))
+        status_var.set(tr("selected", count=len(selected)) if selected else tr("drop_hint"))
 
     def add_paths(paths: Iterable[Path]) -> None:
         existing = {p.resolve() for p in selected if p.exists()}
@@ -2165,7 +2161,7 @@ def run_gui() -> None:
         close_deadline["time"] = time.monotonic() + 4
         set_start_buttons_state("disabled")
         if has_active_worker():
-            status_var.set("正在结束当前转换任务，完成清理后关闭...")
+            status_var.set(tr("closing_status"))
             root.after(200, finish_close_when_ready)
         else:
             finish_close_when_ready()
