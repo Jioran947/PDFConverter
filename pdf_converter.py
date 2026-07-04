@@ -1811,7 +1811,7 @@ def run_gui() -> None:
             cancel_render_job()
             available_width = max(260, preview_canvas.winfo_width() - 28)
             gap_x = 22
-            gap_y = 24
+            gap_y = 28
             min_tile_width = 130
             default_tile_width = 260
             max_columns = max(1, min(len(doc), int((available_width + gap_x) // (min_tile_width + gap_x))))
@@ -1822,7 +1822,8 @@ def run_gui() -> None:
             tile_width = int((available_width - gap_x * (columns - 1)) / columns)
             tile_width = max(1, tile_width)
             max_preview_width = tile_width
-            label_height = 34
+            label_gap = 5
+            label_height = 25
 
             if (
                 layout_state["columns"] == columns
@@ -1846,7 +1847,7 @@ def run_gui() -> None:
                 end = min(len(doc), start + columns)
                 tallest_page = max(page_heights[start:end], default=1)
                 row_tops.append(current_y)
-                current_y += tallest_page + label_height + gap_y
+                current_y += tallest_page + label_gap + label_height + gap_y
 
             layout_state["columns"] = columns
             layout_state["tile_width"] = tile_width
@@ -1935,10 +1936,10 @@ def run_gui() -> None:
                             tags=("page_item",),
                         )
                         preview_canvas.create_text(
-                            x,
-                            y + pix.height + 10,
+                            x + pix.width / 2,
+                            y + pix.height + label_gap,
                             text=tr("page_label", page=index + 1),
-                            anchor="nw",
+                            anchor="n",
                             fill="#111111",
                             font=("Microsoft YaHei UI", 11),
                             tags=("page_item", tag),
